@@ -140,6 +140,7 @@ namespace Vulkan{
   VkDevice                    vDevice;
   SwapChain                   vSwapchain;
   VkPipelineLayout            vPipelineLayout;
+  VkRenderPass                vRenderPass;
   std::vector<const char*>    vLayernames = {
     "VK_LAYER_KHRONOS_validation"
   };
@@ -384,7 +385,35 @@ VkShaderModule createShader(const char* path){
   VK_CHECK(vkCreateShaderModule(vDevice, &shadercreateinfo,nullptr,&shadermodule));
   return shadermodule;
 }
-
+void createRenderPass(){
+  VkAttachmentDescription attachmentdescription = {
+    .format = vSwapchain.vImageFormat,
+    .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+    .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+    .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    .finalLayout   = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+  };
+  VkAttachmentReference attachmentreference = {
+    .attachment = 0,
+    .layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+  };
+  VkSubpassDescription subpass = {
+    .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+    .colorAttachmentCount = 1,
+    .pColorAttachments = &attachmentreference
+  };
+  VkRenderPassCreateInfo renderpassinfo  =
+  {
+    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+    .attachmentCount = 1,
+    .pAttachments = &attachmentdescription,
+    .subpassCount = 1,
+    .pSubpasses = &subpass,
+  };
+  vkCreateRenderPass(vDevice, &renderpassinfo, NULL, &vRenderPass);
+}
 void createPipeline(){
   VkShaderModule vertex   = createShader("vshader.spv");
   VkShaderModule fragment = createShader("fshader.spv");
@@ -466,7 +495,7 @@ void createPipeline(){
     .pushConstantRangeCount = 0,
     .pPushConstantRanges = nullptr
   };
-  vkCreatePipelineLayout(vDevice, &pipelinelayoutcreate, nullptr, &vPipelineLayout);
+  VK_CHECK(vkCreatePipelineLayout(vDevice, &pipelinelayoutcreate, nullptr, &vPipelineLayout));
 
   vkDestroyShaderModule(vDevice, vertex,nullptr);
   vkDestroyShaderModule(vDevice, fragment,nullptr);
@@ -515,6 +544,7 @@ void destroySwapchain(){
 }
 void destroyPipeline(){
   vkDestroyPipelineLayout(vDevice, vPipelineLayout, nullptr);
+  vkDestroyRenderPass(vDevice, vRenderPass, NULL);
 }
 
 // Cleans up vulkan
