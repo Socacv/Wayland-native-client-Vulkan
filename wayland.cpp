@@ -117,6 +117,10 @@ namespace Vulkan{
     VkPhysicalDeviceMemoryProperties     vPhyDevMemoryProperties;
     std::vector<VkPresentModeKHR>        vPresentMode;
   };
+  struct QueueIndices {
+    uint32_t presentQueue;
+    uint32_t graphicsQueue;
+  };
   // Struct that represents a Swapchain image
   struct SwapChainImage {
     VkImage         vImage;
@@ -126,10 +130,10 @@ namespace Vulkan{
   };
   // Struct that represents a Swapchain with its images and format
   struct SwapChain {
-    VkSwapchainKHR vSwapchain;
+    VkSwapchainKHR              vSwapchain;
     std::vector<SwapChainImage> vSwapchainImages;
-    VkFormat vImageFormat;
-    VkExtent2D vExtent;
+    VkFormat                    vImageFormat;
+    VkExtent2D                  vExtent;
   };
   // Global Vk objects
   VkSurfaceKHR                vSurface  = VK_NULL_HANDLE;
@@ -138,9 +142,13 @@ namespace Vulkan{
   std::vector<PhysicalDevice> vAvailablePhyDev;
   PhysicalDevice             *vSelectedPhyDev;
   VkDevice                    vDevice;
+  QueueIndices                vIndices;
   SwapChain                   vSwapchain;
   VkPipelineLayout            vPipelineLayout;
+  VkPipeline                  vPipeline;
   VkRenderPass                vRenderPass;
+  VkCommandPool               vCommandPool;
+
   std::vector<const char*>    vLayernames = {
     "VK_LAYER_KHRONOS_validation"
   };
@@ -242,21 +250,21 @@ VkBool32 checkExtensions(std::string extocheck){
 }
 // Creates a Vulkan logical device
 void createLogicalDevice(){
-  uint32_t qIndex = selectQueueByPropriety(*vSelectedPhyDev, VK_QUEUE_GRAPHICS_BIT, false);
-  fprintf(stdout, "qindex = %d \n", qIndex);
-  uint32_t pIndex = selectQueueByPropriety(*vSelectedPhyDev, 0, true);
-  fprintf(stdout, "pindex = %d \n", pIndex);
-  if(qIndex == -1){
+  vIndices.graphicsQueue = selectQueueByPropriety(*vSelectedPhyDev, VK_QUEUE_GRAPHICS_BIT, false);
+  fprintf(stdout, "qindex = %d \n", vIndices.graphicsQueue);
+  vIndices.presentQueue  = selectQueueByPropriety(*vSelectedPhyDev, 0, true);
+  fprintf(stdout, "pindex = %d \n", vIndices.presentQueue);
+  if(vIndices.graphicsQueue == -1){
     fprintf(stdout, "No suitable index found for bitmask\n");
     exit(1);
   }
   float queuepriority = 1.0f;
-  if(qIndex == pIndex){
+  if(vIndices.graphicsQueue == vIndices.presentQueue){
     VkDeviceQueueCreateInfo queuecreateinfo[1]={{
       .sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
       .pNext            = NULL,
       .flags            = 0,
-      .queueFamilyIndex = pIndex,
+      .queueFamilyIndex = vIndices.graphicsQueue,
       .queueCount       = 2,
       .pQueuePriorities = &queuepriority,
     }};
@@ -387,30 +395,30 @@ VkShaderModule createShader(const char* path){
 }
 void createRenderPass(){
   VkAttachmentDescription attachmentdescription = {
-    .format = vSwapchain.vImageFormat,
-    .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-    .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+    .format         = vSwapchain.vImageFormat,
+    .loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR,
+    .storeOp        = VK_ATTACHMENT_STORE_OP_STORE,
+    .stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
     .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-    .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-    .finalLayout   = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+    .initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED,
+    .finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
   };
   VkAttachmentReference attachmentreference = {
     .attachment = 0,
     .layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
   };
   VkSubpassDescription subpass = {
-    .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+    .pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS,
     .colorAttachmentCount = 1,
-    .pColorAttachments = &attachmentreference
+    .pColorAttachments    = &attachmentreference
   };
   VkRenderPassCreateInfo renderpassinfo  =
   {
-    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+    .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
     .attachmentCount = 1,
-    .pAttachments = &attachmentdescription,
-    .subpassCount = 1,
-    .pSubpasses = &subpass,
+    .pAttachments    = &attachmentdescription,
+    .subpassCount    = 1,
+    .pSubpasses      = &subpass,
   };
   vkCreateRenderPass(vDevice, &renderpassinfo, NULL, &vRenderPass);
 }
@@ -489,16 +497,68 @@ void createPipeline(){
     .lineWidth               = 1.0f
   };
   VkPipelineLayoutCreateInfo pipelinelayoutcreate = {
-    .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-    .setLayoutCount = 0,
-    .pSetLayouts = nullptr,
+    .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+    .setLayoutCount         = 0,
+    .pSetLayouts            = nullptr,
     .pushConstantRangeCount = 0,
-    .pPushConstantRanges = nullptr
+    .pPushConstantRanges    = nullptr
   };
   VK_CHECK(vkCreatePipelineLayout(vDevice, &pipelinelayoutcreate, nullptr, &vPipelineLayout));
+  VkGraphicsPipelineCreateInfo graphicspipelineinfo = {
+    .sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+    .stageCount          = 2,
+    .pStages             = shaderstage,
+    .pVertexInputState   = &vertexinfostate,
+    .pInputAssemblyState = &inputasmstate,
+    .pTessellationState  = NULL,
+    .pViewportState      = &viewportstate,
+    .pRasterizationState = &rasterizationstate,
+    .pMultisampleState   = NULL,
+    .pDepthStencilState  = NULL,
+    .pColorBlendState    = NULL,
+    .pDynamicState       = &dynamicstate,
+    .layout              = vPipelineLayout,
+    .renderPass          = vRenderPass,
+    .subpass             = 0,
+    .basePipelineHandle  = VK_NULL_HANDLE,
+    .basePipelineIndex   = -1
+  };
+
+  vkCreateGraphicsPipelines(vDevice, VK_NULL_HANDLE, 1, &graphicspipelineinfo, NULL, &vPipeline);
+
 
   vkDestroyShaderModule(vDevice, vertex,nullptr);
   vkDestroyShaderModule(vDevice, fragment,nullptr);
+}
+void createFramebuffers(){
+  for(auto &x : vSwapchain.vSwapchainImages){
+    VkFramebufferCreateInfo framebufferinfo = {
+      .sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+      .renderPass      = vRenderPass,
+      .attachmentCount = 1,
+      .pAttachments    = &x.vImageView,
+      .width           = Wayland::width,
+      .height          = Wayland::height,
+      .layers          = 1
+    };
+    VK_CHECK(vkCreateFramebuffer(vDevice, &framebufferinfo, NULL, &x.vFramebuffer));
+  }
+}
+void createCommandPool(){
+  VkCommandPoolCreateInfo commandpoolinfo ={
+    .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+    .queueFamilyIndex = vIndices.graphicsQueue
+  };
+  VK_CHECK(vkCreateCommandPool(vDevice, &commandpoolinfo, nullptr, &vCommandPool));
+  for (auto &x  : vSwapchain.vSwapchainImages) {
+    VkCommandBufferBeginInfo commandbufferinfo = {
+      .sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags            = 0,
+      .pInheritanceInfo = NULL
+    };
+    vkBeginCommandBuffer(x.vCommandBuffer, &commandbufferinfo);
+  }
 }
 // Sets up vulkan
 void initvulkan(){
@@ -535,6 +595,13 @@ void initvulkan(){
   vSelectedPhyDev = &vAvailablePhyDev[0];
   createLogicalDevice();
   createSwapChain();
+  createCommandPool();
+
+}
+void destroyFramebuffers(){
+  for(auto &x : vSwapchain.vSwapchainImages){
+    vkDestroyFramebuffer(vDevice, x.vFramebuffer, nullptr);
+  }
 }
 void destroySwapchain(){
   for(auto &x : vSwapchain.vSwapchainImages){
@@ -543,6 +610,7 @@ void destroySwapchain(){
   vkDestroySwapchainKHR(vDevice, vSwapchain.vSwapchain, nullptr);
 }
 void destroyPipeline(){
+  vkDestroyPipeline(vDevice, vPipeline, NULL);
   vkDestroyPipelineLayout(vDevice, vPipelineLayout, nullptr);
   vkDestroyRenderPass(vDevice, vRenderPass, NULL);
 }
@@ -554,6 +622,7 @@ void destroyvulkan(){
     fprintf(stderr, "Cannot find vkDestroyDebugUtilsMessengerEXT in the instance\n");
     exit(1);
   }
+  destroyFramebuffers();
   destroySwapchain();
   destroyPipeline();
   vkDestroyDevice(vDevice, nullptr);
