@@ -4,6 +4,8 @@
 #include <cstring>
 #include <cstdio>
 #include <fstream>
+#include <iostream>
+#include <ostream>
 #include <unistd.h>
 #include <string>
 #include <sys/types.h>
@@ -125,8 +127,13 @@ namespace Vulkan{
   struct SwapChainImage {
     VkImage         vImage;
     VkImageView     vImageView;
-    VkCommandBuffer vCommandBuffer;
     VkFramebuffer   vFramebuffer;
+  };
+  struct Frame {
+    VkCommandBuffer vCommandBuffer;
+    VkFence         vFence;
+    VkSemaphore     vFinishRender;
+    VkSemaphore     vImageReady;
   };
   // Struct that represents a Swapchain with its images and format
   struct SwapChain {
@@ -148,7 +155,8 @@ namespace Vulkan{
   VkPipeline                  vPipeline;
   VkRenderPass                vRenderPass;
   VkCommandPool               vCommandPool;
-
+  VkQueue                     vQueues[2];
+  Frame                       vFrames[2];
   std::vector<const char*>    vLayernames = {
     "VK_LAYER_KHRONOS_validation"
   };
@@ -258,7 +266,7 @@ void createLogicalDevice(){
     fprintf(stdout, "No suitable index found for bitmask\n");
     exit(1);
   }
-  float queuepriority = 1.0f;
+  float queuepriority[2] = {1.0f, 1.0f};
   if(vIndices.graphicsQueue == vIndices.presentQueue){
     VkDeviceQueueCreateInfo queuecreateinfo[1]={{
       .sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -266,7 +274,7 @@ void createLogicalDevice(){
       .flags            = 0,
       .queueFamilyIndex = vIndices.graphicsQueue,
       .queueCount       = 2,
-      .pQueuePriorities = &queuepriority,
+      .pQueuePriorities = queuepriority,
     }};
     std::vector<const char*> extensions;
     if(checkExtensions(VK_KHR_SWAPCHAIN_EXTENSION_NAME)){
@@ -289,6 +297,8 @@ void createLogicalDevice(){
     .pEnabledFeatures        = &features,
     };
     VK_CHECK(vkCreateDevice(vSelectedPhyDev->vPhyDev, &devCreateInfo, NULL, &vDevice));
+    vkGetDeviceQueue(vDevice, vIndices.graphicsQueue, 0, &vQueues[0]);
+    vkGetDeviceQueue(vDevice, vIndices.presentQueue, 1, &vQueues[1]);
   }
 }
 // Creates the debug callback
@@ -381,6 +391,7 @@ void createSwapChain(){
     vkCreateImageView(vDevice, &imageviewcreateinfo, nullptr, &x.vImageView);
   }
 }
+// Returns a shader module from a path
 VkShaderModule createShader(const char* path){
   std::vector<char> shaderbyte = readfile(path);
 
@@ -393,9 +404,11 @@ VkShaderModule createShader(const char* path){
   VK_CHECK(vkCreateShaderModule(vDevice, &shadercreateinfo,nullptr,&shadermodule));
   return shadermodule;
 }
+// Creates the global render pass
 void createRenderPass(){
   VkAttachmentDescription attachmentdescription = {
     .format         = vSwapchain.vImageFormat,
+    .samples        = VK_SAMPLE_COUNT_1_BIT,
     .loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR,
     .storeOp        = VK_ATTACHMENT_STORE_OP_STORE,
     .stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
@@ -412,6 +425,16 @@ void createRenderPass(){
     .colorAttachmentCount = 1,
     .pColorAttachments    = &attachmentreference
   };
+  VkSubpassDependency subpassdependency = {
+    .srcSubpass    = VK_SUBPASS_EXTERNAL,
+    .dstSubpass    = 0,
+
+    .srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+    .dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+
+    .srcAccessMask = 0,
+    .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+  };
   VkRenderPassCreateInfo renderpassinfo  =
   {
     .sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
@@ -419,9 +442,12 @@ void createRenderPass(){
     .pAttachments    = &attachmentdescription,
     .subpassCount    = 1,
     .pSubpasses      = &subpass,
+    .dependencyCount = 1,
+    .pDependencies   = &subpassdependency
   };
-  vkCreateRenderPass(vDevice, &renderpassinfo, NULL, &vRenderPass);
+  VK_CHECK(vkCreateRenderPass(vDevice, &renderpassinfo, NULL, &vRenderPass));
 }
+// Creates the pipeline
 void createPipeline(){
   VkShaderModule vertex   = createShader("vshader.spv");
   VkShaderModule fragment = createShader("fshader.spv");
@@ -530,6 +556,7 @@ void createPipeline(){
   vkDestroyShaderModule(vDevice, vertex,nullptr);
   vkDestroyShaderModule(vDevice, fragment,nullptr);
 }
+// Create the framebuffers 
 void createFramebuffers(){
   for(auto &x : vSwapchain.vSwapchainImages){
     VkFramebufferCreateInfo framebufferinfo = {
@@ -544,21 +571,122 @@ void createFramebuffers(){
     VK_CHECK(vkCreateFramebuffer(vDevice, &framebufferinfo, NULL, &x.vFramebuffer));
   }
 }
+// Create the command pool
 void createCommandPool(){
   VkCommandPoolCreateInfo commandpoolinfo ={
-    .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+    .sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+    .flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
     .queueFamilyIndex = vIndices.graphicsQueue
   };
   VK_CHECK(vkCreateCommandPool(vDevice, &commandpoolinfo, nullptr, &vCommandPool));
-  for (auto &x  : vSwapchain.vSwapchainImages) {
-    VkCommandBufferBeginInfo commandbufferinfo = {
-      .sType            = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-      .flags            = 0,
-      .pInheritanceInfo = NULL
+  for(auto &x : vFrames){
+    VkCommandBufferAllocateInfo commandbufferallocateinfo = {
+      .sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool        = vCommandPool,
+      .level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1
     };
-    vkBeginCommandBuffer(x.vCommandBuffer, &commandbufferinfo);
+    VK_CHECK(vkAllocateCommandBuffers(vDevice, &commandbufferallocateinfo, &x.vCommandBuffer));
   }
+}
+void createSyncobjects(){
+  for (auto &x : vFrames) {
+    VkFenceCreateInfo fenceinfo = {
+      .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+      .pNext = nullptr,
+      .flags = VK_FENCE_CREATE_SIGNALED_BIT
+    };
+    vkCreateFence(vDevice, &fenceinfo, nullptr, &x.vFence);
+
+
+    VkSemaphoreCreateInfo semaphoreinfo ={
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      .pNext = nullptr,
+      .flags = 0
+    };
+    vkCreateSemaphore(vDevice, &semaphoreinfo, nullptr, &x.vImageReady);
+    vkCreateSemaphore(vDevice, &semaphoreinfo, nullptr, &x.vFinishRender);
+  }
+}
+// Main draw loop
+void drawCommands(Frame* frame, uint32_t imageIndex){
+  VkCommandBuffer usedCommandBuffer = frame->vCommandBuffer;
+  VkCommandBufferBeginInfo commandbufferbegininfo = {
+    .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+    .flags = 0,
+    .pInheritanceInfo = nullptr
+  };
+  VK_CHECK(vkBeginCommandBuffer(usedCommandBuffer, &commandbufferbegininfo));
+  
+  VkRect2D renderarea;
+  renderarea.extent = {vSwapchain.vExtent};
+  renderarea.offset = {0,0};
+  VkClearValue clearvalue;
+  clearvalue.color = {{0.0,0.0,0.0,1.0}};
+  VkRenderPassBeginInfo renderpassbegininfo = {
+    .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+    .renderPass = vRenderPass,
+    .framebuffer = vSwapchain.vSwapchainImages[imageIndex].vFramebuffer,
+    .renderArea = renderarea,
+    .clearValueCount = 1,
+    .pClearValues = &clearvalue
+  };
+  vkCmdBeginRenderPass(usedCommandBuffer, &renderpassbegininfo, VK_SUBPASS_CONTENTS_INLINE);
+
+  vkCmdBindPipeline(usedCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vPipeline);
+  VkViewport viewport = {
+    .x        = 0,
+    .y        = 0,
+    .width    = static_cast<float>(Wayland::width),
+    .height   = static_cast<float>(Wayland::height),
+    .minDepth = 0.0f,
+    .maxDepth = 1.0f
+  };
+  vkCmdSetViewport(usedCommandBuffer,0,1,&viewport);
+  VkOffset2D offset = {0,0,};
+  VkRect2D scissor = {
+    .offset = offset,
+    .extent = vSwapchain.vExtent   
+  };
+  vkCmdSetScissor(usedCommandBuffer, 0, 1, &scissor);
+  vkCmdDraw(usedCommandBuffer, 3, 1, 0, 0);
+  vkCmdEndRenderPass(usedCommandBuffer);
+  VK_CHECK(vkEndCommandBuffer(usedCommandBuffer));
+}
+
+
+
+void draw(uint32_t frameIndex){
+  Frame* currentFrame = &vFrames[frameIndex];
+  vkWaitForFences(vDevice, 1, &currentFrame->vFence, VK_TRUE, UINT64_MAX);
+  vkResetFences(vDevice, 1, &currentFrame->vFence);
+  uint32_t imageIndex;
+  VK_CHECK(vkAcquireNextImageKHR(vDevice,vSwapchain.vSwapchain,UINT64_MAX,currentFrame->vImageReady,VK_NULL_HANDLE,&imageIndex));
+  vkResetCommandBuffer(currentFrame->vCommandBuffer, 0);
+
+  drawCommands(currentFrame,imageIndex);
+  VkPipelineStageFlags waitstage = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+  VkSubmitInfo submitinfo ={
+    .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+    .waitSemaphoreCount = 1,
+    .pWaitSemaphores = &currentFrame->vImageReady,
+    .pWaitDstStageMask = &waitstage,
+    .commandBufferCount = 1,
+    .pCommandBuffers = &currentFrame->vCommandBuffer,
+    .signalSemaphoreCount = 1,
+    .pSignalSemaphores = &currentFrame->vFinishRender
+  };
+  vkQueueSubmit(vQueues[0], 1, &submitinfo, currentFrame->vFence);
+  VkPresentInfoKHR presentinfo = {
+    .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+    .waitSemaphoreCount = 1,
+    .pWaitSemaphores = &currentFrame->vFinishRender,
+    .swapchainCount = 1,
+    .pSwapchains = &vSwapchain.vSwapchain,
+    .pImageIndices = &imageIndex,
+    .pResults = nullptr
+  };
+  vkQueuePresentKHR(vQueues[1], &presentinfo);
 }
 // Sets up vulkan
 void initvulkan(){
@@ -595,9 +723,20 @@ void initvulkan(){
   vSelectedPhyDev = &vAvailablePhyDev[0];
   createLogicalDevice();
   createSwapChain();
+  createRenderPass();
+  createPipeline();
+  createFramebuffers();
   createCommandPool();
-
+  createSyncobjects();
 }
+
+void destroySyncobjects(){
+  for(auto &x : vFrames){
+    vkWaitForFences(vDevice, 1, &x.vFence, VK_TRUE, UINT64_MAX);
+    vkDestroyFence(vDevice, x.vFence, nullptr);
+    vkDestroySemaphore(vDevice, x.vFinishRender, nullptr);
+    vkDestroySemaphore(vDevice, x.vImageReady, nullptr);
+}}
 void destroyFramebuffers(){
   for(auto &x : vSwapchain.vSwapchainImages){
     vkDestroyFramebuffer(vDevice, x.vFramebuffer, nullptr);
@@ -614,7 +753,9 @@ void destroyPipeline(){
   vkDestroyPipelineLayout(vDevice, vPipelineLayout, nullptr);
   vkDestroyRenderPass(vDevice, vRenderPass, NULL);
 }
-
+void destroyCommands(){
+  vkDestroyCommandPool(vDevice, vCommandPool, nullptr);
+}
 // Cleans up vulkan
 void destroyvulkan(){
   PFN_vkDestroyDebugUtilsMessengerEXT vkDestroyDebugUtilsMessengerEXT = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(vInstance, "vkDestroyDebugUtilsMessengerEXT");
@@ -622,9 +763,11 @@ void destroyvulkan(){
     fprintf(stderr, "Cannot find vkDestroyDebugUtilsMessengerEXT in the instance\n");
     exit(1);
   }
+  destroySyncobjects();
   destroyFramebuffers();
   destroySwapchain();
   destroyPipeline();
+  destroyCommands();
   vkDestroyDevice(vDevice, nullptr);
   vkDestroyDebugUtilsMessengerEXT(vInstance, vMessenger, nullptr);
   vkDestroySurfaceKHR(vInstance, vSurface, NULL);
@@ -662,6 +805,11 @@ main(int argc, char *argv[])
   wl_display_roundtrip(Wayland::display);
 
   Vulkan::initvulkan();
+  uint32_t frameindex = 0;
+  for(int i = 0; i < 50; i++){
+    Vulkan::draw(frameindex);
+    frameindex = (frameindex + 1) % 2;
+  }
   sleep(5);
   Vulkan::destroyvulkan();
   wl_display_disconnect(Wayland::display);
